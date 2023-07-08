@@ -8,32 +8,44 @@ import copy
 from torch.nn import BatchNorm1d
 from collections import OrderedDict
 
-
+# Top-Down Graph Convolutional Networks
 class TDrumorGCN(th.nn.Module):
     def __init__(self,args):
         super(TDrumorGCN, self).__init__()
         self.args = args
+        # first layer: input features are the word embedding of the tweet contents, output is the number of neurons in the layer
         self.conv1 = GCNConv(args.input_features, args.hidden_features)
+        # second layer: input dimension is the word embedding features + the output dimension from the first layer, output the class probabilities
         self.conv2 = GCNConv(args.input_features + args.hidden_features, args.output_features)
         self.device = args.device
-
+        # store the number of hidden feature number as a list: 64 ---> [64]
         self.num_features_list = [args.hidden_features * r for r in [1]]
 
         def creat_network(self, name):
+            # in OrderedDict() the order is important and will be kept if any item inserted into this dict
             layer_list = OrderedDict()
+            # for each layer:
             for l in range(len(self.num_features_list)):
+                # store the convolutional layer in the corresponding key
+                # the layer is a 1D convolutional operator with padding and stride = 1, kernel/sliding window size = 1 X 1
+                # input channels is the hidden features and output the same dimension
+                # no bias in this case, so the weight in the sliding windows is the only trainable weight in this layer
                 layer_list[name + 'conv{}'.format(l)] = th.nn.Conv1d(
                     in_channels=args.hidden_features,
                     out_channels=args.hidden_features,
                     kernel_size=1,
                     bias=False)
+                # do normalization on the output of the previous layer
                 layer_list[name + 'norm{}'.format(l)] = th.nn.BatchNorm1d(num_features=args.hidden_features)
+                # output LeakyReLu of the output from the previous layer
                 layer_list[name + 'relu{}'.format(l)] = th.nn.LeakyReLU()
+            # 1 X 1 sliding windows to scan all the hidden features into a probability (true or false)
             layer_list[name + 'conv_out'] = th.nn.Conv1d(in_channels=args.hidden_features,
                                                          out_channels=1,
                                                          kernel_size=1)
             return layer_list
-
+            
+        ### create Sequential network with the network structure order described in the function "create_network"
         self.sim_network = th.nn.Sequential(creat_network(self, 'sim_val'))
         mod_self = self
         mod_self.num_features_list = [args.hidden_features]
@@ -41,16 +53,26 @@ class TDrumorGCN(th.nn.Module):
         self.W_bias = th.nn.Sequential(creat_network(mod_self, 'W_bias'))
         self.B_mean = th.nn.Sequential(creat_network(mod_self, 'B_mean'))
         self.B_bias = th.nn.Sequential(creat_network(mod_self, 'B_bias'))
+        ###
+
+        ### define fully connected neural network function with input dimension = hidden feature and output the dimension of the number of edge
         self.fc1 = th.nn.Linear(args.hidden_features, args.edge_num, bias=False)
         self.fc2 = th.nn.Linear(args.hidden_features, args.edge_num, bias=False)
+        ###
+        # define random dropout function with proportion = args.dropout
         self.dropout = th.nn.Dropout(args.dropout)
+        # loss = y_true * (log y_true - log y_pred) / input_size
         self.eval_loss = th.nn.KLDivLoss(reduction='batchmean')
+        # normalization on the previous layer with dimension = hidden_features + word_embedding size
         self.bn1 = BatchNorm1d(args.hidden_features + args.input_features)
 
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
+        # store a copy of the original input x where the dimension = number of nodes X number of word_embedding features
         x1 = copy.copy(x.float())
+        # input the adjacency matrix and X's word embedding features, return the output with dimension = Number of nodes X hidden_dimension
         x = self.conv1(x, edge_index)
+        # save a copy of the output from the first conv1 layer
         x2 = copy.copy(x)
 
         if self.args.edge_infer_td:
@@ -81,25 +103,45 @@ class TDrumorGCN(th.nn.Module):
         return x, edge_loss
 
     def edge_infer(self, x, edge_index):
+        ## X is of dimension (N X F)
         row, col = edge_index[0], edge_index[1]
+        # convert (N X F) into a column （N X F X 1) 
         x_i = x[row - 1].unsqueeze(2)
+        # convert (N X F) into a column （N X 1 X F)
         x_j = x[col - 1].unsqueeze(1)
+        # take absolute difference between x_i and x_j, dimension = (N X F X F)
         x_ij = th.abs(x_i - x_j)
+        # go through the network architecture (Conv1D, normalization, LeakyReLu, Conv1D) and output the result with (N X 1 X F)
         sim_val = self.sim_network(x_ij)
+        # dimension will be converted from (N X 1 X F) into (N X 1 X edge_num)
         edge_pred = self.fc1(sim_val)
+        # convert the values to probabilities (N X 1 X edge_num)
         edge_pred = th.sigmoid(edge_pred)
+
+        ## convert the input (N X F X F) into (N X 1 X F)
         w_mean = self.W_mean(x_ij)
         w_bias = self.W_bias(x_ij)
         b_mean = self.B_mean(x_ij)
         b_bias = self.B_bias(x_ij)
+        ##
+        ## logit_mean and logit_var refer to the Factorized Guassian distribution (u and var), dim = (N X 1 X F)
         logit_mean = w_mean * sim_val + b_mean
         logit_var = th.log((sim_val ** 2) * th.exp(w_bias) + th.exp(b_bias))
+        ##
+
+        # the value of edge weight follow a normal distribution with dim = (N X 1 X F)
         edge_y = th.normal(logit_mean, logit_var)
+        # convert the values from normal distribution to probabilities (N X 1 X F)
         edge_y = th.sigmoid(edge_y)
+        # input the probabilities (N X 1 X F), return the output (N X 1 X edge_num)
         edge_y = self.fc2(edge_y)
+        # take the log of the softmax value of edge_pred, output dim = (N X 1 X edge_num)
         logp_x = F.log_softmax(edge_pred, dim=-1)
+        # take softmax value of edge_y, output dim = (N X 1 X edge_num)
         p_y = F.softmax(edge_y, dim=-1)
+        # calculate the loss of two distributions, return an average loss
         edge_loss = self.eval_loss(logp_x, p_y)
+        # return a loss value, and the mean edge_pred (N X 1 X 1)
         return edge_loss, th.mean(edge_pred, dim=-1).squeeze(1)
 
 class BUrumorGCN(th.nn.Module):
@@ -210,3 +252,4 @@ class EBGCN(th.nn.Module):
         out = self.fc(self.x)
         out = F.log_softmax(out, dim=1)
         return out,  TD_edge_loss, BU_edge_loss
+        
