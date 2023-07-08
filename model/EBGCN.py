@@ -13,6 +13,7 @@ class TDrumorGCN(th.nn.Module):
     def __init__(self,args):
         super(TDrumorGCN, self).__init__()
         self.args = args
+        
         # first layer: input features are the word embedding of the tweet contents, output is the number of neurons in the layer
         self.conv1 = GCNConv(args.input_features, args.hidden_features)
         # second layer: input dimension is the word embedding features + the output dimension from the first layer, output the class probabilities
@@ -70,7 +71,7 @@ class TDrumorGCN(th.nn.Module):
         x, edge_index = data.x, data.edge_index
         # store a copy of the original input x where the dimension = number of nodes X number of word_embedding features
         x1 = copy.copy(x.float())
-        # input the adjacency matrix and X's word embedding features, return the output with dimension = Number of nodes X hidden_dimension
+        # input the adjacency matrix and X's word embedding features, return the output with dimension = (Number of nodes X hidden_dimension)          
         x = self.conv1(x, edge_index)
         # save a copy of the output from the first conv1 layer
         x2 = copy.copy(x)
@@ -81,35 +82,48 @@ class TDrumorGCN(th.nn.Module):
             edge_loss, edge_pred = None, None
 
         rootindex = data.rootindex
+        ## size(1) number of features
         root_extend = th.zeros(len(data.batch), x1.size(1)).to(self.device)
         batch_size = max(data.batch) + 1
+
+        ## first update                              ________question_________
         for num_batch in range(batch_size):
             index = (th.eq(data.batch, num_batch))
             root_extend[index] = x1[rootindex[num_batch]]
+        # combine the two matrix based on column
+        # x: (N X input_features), root_extend: (N X hidden_features)
+        # x will be converted into (N X (input_features + hidden_features))
         x = th.cat((x, root_extend), 1)
-
         x = self.bn1(x)
         x = F.relu(x)
 
+        # edge_pred: (N X 1 X 1)
+        # A: N X N
+        # the 1st row of A: A1: 1 X N
+        # edge_weight.T: 1 X N, updated A1: A1 point_wise_multi with edge_weight
+        # go through all N rows
         x = self.conv2(x, edge_index, edge_weight=edge_pred)
         x = F.relu(x)
         root_extend = th.zeros(len(data.batch), x2.size(1)).to(self.device)
+        # second update
         for num_batch in range(batch_size):
             index = (th.eq(data.batch, num_batch))
             root_extend[index] = x2[rootindex[num_batch]]
+        # updated x's dim = (N X (input_features + hidden_features + hidden_features))
         x = th.cat((x, root_extend), 1)
-
+        # ______question________
         x = scatter_mean(x, data.batch, dim=0)
         return x, edge_loss
 
     def edge_infer(self, x, edge_index):
+        ## edge_index[0]: [node1, node3] ---> edge_index[1]: [node2, node4]
         ## X is of dimension (N X F)
         row, col = edge_index[0], edge_index[1]
-        # convert (N X F) into a column （N X F X 1) 
+        # convert (N X F) into a column （N X F X 1)
         x_i = x[row - 1].unsqueeze(2)
         # convert (N X F) into a column （N X 1 X F)
         x_j = x[col - 1].unsqueeze(1)
-        # take absolute difference between x_i and x_j, dimension = (N X F X F)
+        # take absolute difference between x_i and x_j, dimension = (N X F X F)      ____________question_____________
         x_ij = th.abs(x_i - x_j)
         # go through the network architecture (Conv1D, normalization, LeakyReLu, Conv1D) and output the result with (N X 1 X F)
         sim_val = self.sim_network(x_ij)
@@ -117,7 +131,8 @@ class TDrumorGCN(th.nn.Module):
         edge_pred = self.fc1(sim_val)
         # convert the values to probabilities (N X 1 X edge_num)
         edge_pred = th.sigmoid(edge_pred)
-
+        ## The likelihood of latent relations from the l-th layer based on node embeddings (P)
+        
         ## convert the input (N X F X F) into (N X 1 X F)
         w_mean = self.W_mean(x_ij)
         w_bias = self.W_bias(x_ij)
@@ -133,14 +148,14 @@ class TDrumorGCN(th.nn.Module):
         edge_y = th.normal(logit_mean, logit_var)
         # convert the values from normal distribution to probabilities (N X 1 X F)
         edge_y = th.sigmoid(edge_y)
-        # input the probabilities (N X 1 X F), return the output (N X 1 X edge_num)
+        # input the probabilities (N X 1 X F), return the output (N X 1 X edge_num), (Q)
         edge_y = self.fc2(edge_y)
-        # take the log of the softmax value of edge_pred, output dim = (N X 1 X edge_num)
-        logp_x = F.log_softmax(edge_pred, dim=-1)
+        # take the log of the softmax value of edge_pred, output dim = (N X 1 X edge_num), (P)
+        logp_x = F.log_softmax(edge_pred, dim=-1) 
         # take softmax value of edge_y, output dim = (N X 1 X edge_num)
         p_y = F.softmax(edge_y, dim=-1)
-        # calculate the loss of two distributions, return an average loss
-        edge_loss = self.eval_loss(logp_x, p_y)
+        # calculate the loss of two distributions, return an average loss # KL D loss between P and Q
+        edge_loss = self.eval_loss(logp_x, p_y) 
         # return a loss value, and the mean edge_pred (N X 1 X 1)
         return edge_loss, th.mean(edge_pred, dim=-1).squeeze(1)
 
