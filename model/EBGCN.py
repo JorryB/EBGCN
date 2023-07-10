@@ -82,25 +82,29 @@ class TDrumorGCN(th.nn.Module):
             edge_loss, edge_pred = None, None
 
         rootindex = data.rootindex
-        ## size(1) number of features
+        ## len(data.batch): the number of data points in the batch which is represented by N, size(1): number of features
         root_extend = th.zeros(len(data.batch), x1.size(1)).to(self.device)
+        ## extract the max number of graphs from the dataset batches
         batch_size = max(data.batch) + 1
 
-        ## first update                              ________question_________
+        ## from 0 to (the max number of graphs)
         for num_batch in range(batch_size):
+            ## look for the batch index where the num_batch is equal to the number of graphs in that batch
             index = (th.eq(data.batch, num_batch))
+            ## 
             root_extend[index] = x1[rootindex[num_batch]]
-        # combine the two matrix based on column
+            
+        # combine the two matrix by column
         # x: (N X input_features), root_extend: (N X hidden_features)
         # x will be converted into (N X (input_features + hidden_features))
         x = th.cat((x, root_extend), 1)
         x = self.bn1(x)
         x = F.relu(x)
 
-        # edge_pred: (N X 1 X 1)
+        # edge_pred: (N X 1)
         # A: N X N
-        # the 1st row of A: A1: 1 X N
-        # edge_weight.T: 1 X N, updated A1: A1 point_wise_multi with edge_weight
+        # the 1st row of A: 1 X N
+        # edge_weight.T: 1 X N, updated A1: A1 point_wise_multiplication with edge_weight
         # go through all N rows
         x = self.conv2(x, edge_index, edge_weight=edge_pred)
         x = F.relu(x)
