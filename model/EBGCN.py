@@ -84,22 +84,25 @@ class TDrumorGCN(th.nn.Module):
         rootindex = data.rootindex
         ## len(data.batch): the number of data points in the batch which is represented by N, size(1): number of features
         root_extend = th.zeros(len(data.batch), x1.size(1)).to(self.device)
-        ## extract the max number of graphs from the dataset batches
+        ## the number of graphes + 1
         batch_size = max(data.batch) + 1
 
         ## first update of the input to GCN
-        ## from 0 to (the max number of graphs)
+        ## from 0 to (the number of graphs)
         for num_batch in range(batch_size):
-            ## look for the batch index where the num_batch is equal to the number of graphs in that batch
+            ## look for the data point indexes where the data points in those indexes belong to the (num_batch)th graph
             index = (th.eq(data.batch, num_batch))
-            ## assign the root data point with the corresponding number of graphes in it to root_extend
+            ## assign the root data point which belongs to the (num_batch)th graph to root_extend
+            ## we only care about the root data points
             root_extend[index] = x1[rootindex[num_batch]]
             
         # combine the two matrix by column
         # x: (N X hidden_features), root_extend: (N X input_features)
         # x will be converted into (N X (input_features + hidden_features))
         x = th.cat((x, root_extend), 1)
+        # normalization
         x = self.bn1(x)
+        # take ReLu of the previous output
         x = F.relu(x)
 
         # edge_pred: (N X 1)
@@ -112,23 +115,28 @@ class TDrumorGCN(th.nn.Module):
         # dimension = (N X hidden_features)
         root_extend = th.zeros(len(data.batch), x2.size(1)).to(self.device)
         ## second update of the input to GCN
+        ## the procedure is same as the first update procedure
         for num_batch in range(batch_size):
             index = (th.eq(data.batch, num_batch))
             root_extend[index] = x2[rootindex[num_batch]]
         # updated x's dim = (N X (output_features + hidden_features))
         x = th.cat((x, root_extend), 1)
+        # take mean values of all rows for each graph
+        # the output dimension will be (the number of graphes in the batch X (output_features + hidden_features))
+        # the number of graphes is equal to the number of claims/roots in our datasets
+        # for each node, it will finally have (output_features + hidden_features) variables
         x = scatter_mean(x, data.batch, dim=0)
         return x, edge_loss
 
     def edge_infer(self, x, edge_index):
-        ## edge_index[0]: [node1, node3] ---> edge_index[1]: [node2, node4]
-        ## X is of dimension (N X F)
+        ## edge_index[0]: eg, [node1, node3] ---> edge_index[1]: [node2, node4]
+        ## suppose X is of dimension (N X F)
         row, col = edge_index[0], edge_index[1]
         # convert (N X F) into a column （N X F X 1)
         x_i = x[row - 1].unsqueeze(2)
         # convert (N X F) into a column （N X 1 X F)
         x_j = x[col - 1].unsqueeze(1)
-        # take absolute difference between x_i and x_j, dimension = (N X F X F)      ____________question_____________
+        # take absolute difference between x_i and x_j, dimension = (N X F X F)
         x_ij = th.abs(x_i - x_j)
         # go through the network architecture (Conv1D, normalization, LeakyReLu, Conv1D) and output the result with (N X 1 X F)
         sim_val = self.sim_network(x_ij)
@@ -263,11 +271,13 @@ class EBGCN(th.nn.Module):
         self.args = args
         self.TDrumorGCN = TDrumorGCN(args)
         self.BUrumorGCN = BUrumorGCN(args)
+        # input dimension = N X 2(args.hidden_features + args.output_features), output dimension = N X num_class
         self.fc = th.nn.Linear((args.hidden_features + args.output_features)*2, args.num_class)
 
     def forward(self, data):
         TD_x, TD_edge_loss = self.TDrumorGCN(data)
         BU_x, BU_edge_loss = self.BUrumorGCN(data)
+        # the two outputs are combined by column
         self.x = th.cat((BU_x,TD_x), 1)
         out = self.fc(self.x)
         out = F.log_softmax(out, dim=1)
