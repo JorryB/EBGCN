@@ -117,7 +117,6 @@ class TDrumorGCN(th.nn.Module):
             root_extend[index] = x2[rootindex[num_batch]]
         # updated x's dim = (N X (output_features + hidden_features))
         x = th.cat((x, root_extend), 1)
-        # get the mean of each data point (each row)
         x = scatter_mean(x, data.batch, dim=0)
         return x, edge_loss
 
@@ -165,6 +164,7 @@ class TDrumorGCN(th.nn.Module):
         # return a loss value, and the mean edge_pred (N X 1 X 1)
         return edge_loss, th.mean(edge_pred, dim=-1).squeeze(1)
 
+## same architecture as TDrumorGCN
 class BUrumorGCN(th.nn.Module):
     def __init__(self,args):
         super(BUrumorGCN, self).__init__()
