@@ -87,15 +87,16 @@ class TDrumorGCN(th.nn.Module):
         ## extract the max number of graphs from the dataset batches
         batch_size = max(data.batch) + 1
 
+        ## first update of the input to GCN
         ## from 0 to (the max number of graphs)
         for num_batch in range(batch_size):
             ## look for the batch index where the num_batch is equal to the number of graphs in that batch
             index = (th.eq(data.batch, num_batch))
-            ## 
+            ## assign the root data point with the corresponding number of graphes in it to root_extend
             root_extend[index] = x1[rootindex[num_batch]]
             
         # combine the two matrix by column
-        # x: (N X input_features), root_extend: (N X hidden_features)
+        # x: (N X hidden_features), root_extend: (N X input_features)
         # x will be converted into (N X (input_features + hidden_features))
         x = th.cat((x, root_extend), 1)
         x = self.bn1(x)
@@ -108,14 +109,15 @@ class TDrumorGCN(th.nn.Module):
         # go through all N rows
         x = self.conv2(x, edge_index, edge_weight=edge_pred)
         x = F.relu(x)
+        # dimension = (N X hidden_features)
         root_extend = th.zeros(len(data.batch), x2.size(1)).to(self.device)
-        # second update
+        ## second update of the input to GCN
         for num_batch in range(batch_size):
             index = (th.eq(data.batch, num_batch))
             root_extend[index] = x2[rootindex[num_batch]]
-        # updated x's dim = (N X (input_features + hidden_features + hidden_features))
+        # updated x's dim = (N X (output_features + hidden_features))
         x = th.cat((x, root_extend), 1)
-        # ______question________
+        # get the mean of each data point (each row)
         x = scatter_mean(x, data.batch, dim=0)
         return x, edge_loss
 
@@ -266,7 +268,6 @@ class EBGCN(th.nn.Module):
     def forward(self, data):
         TD_x, TD_edge_loss = self.TDrumorGCN(data)
         BU_x, BU_edge_loss = self.BUrumorGCN(data)
-
         self.x = th.cat((BU_x,TD_x), 1)
         out = self.fc(self.x)
         out = F.log_softmax(out, dim=1)
